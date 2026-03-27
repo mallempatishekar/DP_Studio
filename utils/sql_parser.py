@@ -15,6 +15,7 @@ Used by: pages/1_CADP.py (SQL Builder — Paste DDL mode)
 """
 
 import re
+from utils.error_logger import log_sql_error
 
 
 # Map Snowflake DDL base types → YAML dimension types
@@ -41,7 +42,7 @@ def _map_type(raw_type: str) -> str:
 
 def parse_ddl(ddl_text: str) -> dict:
     """
-    Parse a Snowflake CREATE [OR REPLACE] TABLE DDL statement.
+    Parse a Snowflake CREATE [OR REPLACE] TABLE DDL statement with error handling.
 
     Returns:
         {
@@ -51,58 +52,72 @@ def parse_ddl(ddl_text: str) -> dict:
           "columns": [{"original": str, "alias": str, "snowflake_type": str, "mapped_type": str}]
         }
     """
-    text = ddl_text.strip()
+    try:
+        if not ddl_text or not isinstance(ddl_text, str):
+            raise ValueError("DDL text must be a non-empty string")
+        
+        text = ddl_text.strip()
 
-    # ── 1. Extract table name (db.schema.table / schema.table / table) ────────
-    table_match = re.search(
-        r'CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w\."]+(?:\.[\w\."]+)*)',
-        text, re.IGNORECASE
-    )
-    db, schema, table = "", "", ""
-    if table_match:
-        parts = [p.strip('"') for p in table_match.group(1).split(".")]
-        if len(parts) == 3:
-            db, schema, table = parts
-        elif len(parts) == 2:
-            schema, table = parts
+        # ── 1. Extract table name (db.schema.table / schema.table / table) ────────
+        table_match = re.search(
+            r'CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w\."]+(?:\.[\w\."]+)*)',
+            text, re.IGNORECASE
+        )
+        db, schema, table = "", "", ""
+        if table_match:
+            parts = [p.strip('"') for p in table_match.group(1).split(".")]
+            if len(parts) == 3:
+                db, schema, table = parts
+            elif len(parts) == 2:
+                schema, table = parts
+            else:
+                table = parts[0]
         else:
-            table = parts[0]
+            log_sql_error("Failed to parse table name from DDL - missing CREATE TABLE statement")
+            return {"db": "", "schema": "", "table": "", "columns": []}
 
-    # ── 2. Extract column block between the outermost ( ... ) ─────────────────
-    paren_match = re.search(r'\((.*)\)', text, re.DOTALL)
-    columns = []
-    if paren_match:
-        col_block = paren_match.group(1)
+        # ── 2. Extract column block between the outermost ( ... ) ─────────────────
+        paren_match = re.search(r'\((.*)\)', text, re.DOTALL)
+        columns = []
+        if paren_match:
+            col_block = paren_match.group(1)
 
-        # Split on commas that are NOT inside parentheses (handles VARCHAR(255))
-        col_defs = _split_col_defs(col_block)
+            # Split on commas that are NOT inside parentheses (handles VARCHAR(255))
+            col_defs = _split_col_defs(col_block)
 
-        for raw in col_defs:
-            raw = raw.strip()
-            if not raw:
-                continue
+            for raw in col_defs:
+                raw = raw.strip()
+                if not raw:
+                    continue
 
-            # Skip table-level constraints (PRIMARY KEY, UNIQUE, FOREIGN KEY, etc.)
-            if re.match(r'(PRIMARY\s+KEY|UNIQUE|FOREIGN\s+KEY|CONSTRAINT|CHECK)\b',
-                        raw, re.IGNORECASE):
-                continue
+                # Skip table-level constraints (PRIMARY KEY, UNIQUE, FOREIGN KEY, etc.)
+                if re.match(r'(PRIMARY\s+KEY|UNIQUE|FOREIGN\s+KEY|CONSTRAINT|CHECK)\b',
+                            raw, re.IGNORECASE):
+                    continue
 
-            # Match: COL_NAME  TYPE[(size)] [optional modifiers]
-            col_match = re.match(
-                r'[""]?(\w+)[""]?\s+([\w]+(?:\([\d\s,]+\))?)',
-                raw, re.IGNORECASE
-            )
-            if col_match:
-                col_name  = col_match.group(1)
-                raw_type  = col_match.group(2)
-                columns.append({
-                    "original":      col_name,
-                    "alias":         col_name.lower(),
-                    "snowflake_type": raw_type.upper(),
-                    "mapped_type":   _map_type(raw_type),
-                })
+                # Match: COL_NAME  TYPE[(size)] [optional modifiers]
+                col_match = re.match(
+                    r'[""]?(\w+)[""]?\s+([\w]+(?:\([\d\s,]+\))?)',
+                    raw, re.IGNORECASE
+                )
+                if col_match:
+                    col_name  = col_match.group(1)
+                    raw_type  = col_match.group(2)
+                    columns.append({
+                        "original":      col_name,
+                        "alias":         col_name.lower(),
+                        "snowflake_type": raw_type.upper(),
+                        "mapped_type":   _map_type(raw_type),
+                    })
 
-    return {"db": db, "schema": schema, "table": table, "columns": columns}
+        if not columns:
+            log_sql_error(f"No columns parsed from DDL for table '{table}'")
+
+        return {"db": db, "schema": schema, "table": table, "columns": columns}
+    
+    except Exception as e:
+        log_sql_error(f"Failed to parse DDL: {str(e)}", exception=e)
+        return {"db": "", "schema": "", "table": "", "columns": []}
 
 
 def _split_col_defs(col_block: str) -> list:

@@ -22,3 +22,11 @@ pyyaml
 
 # Data handling (used in sf_utils, description_engine)
 pandas
+
+streamlit
+pandas
+snowflake-connector-python
+PyYAML
+groq
+openpyxl
+python-dotenv

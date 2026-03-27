@@ -10,7 +10,7 @@ and a plain download button instead of a "Back to flow" button.
 import json
 import streamlit as st
 
-from utils.ui_utils import section_header
+from utils.ui_utils import section_header, get_llm_config
 from utils.sf_utils import (
     connect, fetch_databases, fetch_schemas,
     fetch_tables, fetch_full_context, fetch_schema_overview,
@@ -19,7 +19,6 @@ from utils.default_checks import generate_default_checks
 from utils.llm_checks import call_llm
 from utils.qc_yaml_generator import generate_qc_yaml
 from utils.history import save_entry
-from utils.qc_config import PROVIDER, GROQ_DEFAULT_MODEL, OLLAMA_DEFAULT_MODEL
 
 import pandas as pd
 
@@ -112,13 +111,14 @@ def render_ind_qc():
             st.session_state[k] = v
         st.rerun()
 
-    model_label = GROQ_DEFAULT_MODEL if PROVIDER == "groq" else OLLAMA_DEFAULT_MODEL
+    model_config = get_llm_config()
+    provider = model_config.get("provider", "groq")
+    model_label = model_config.get("model", "llama-3.1-8b-instant")
     st.markdown(
         f'<div style="background:#111827;border:1px solid #1f2937;border-radius:8px;'
         f'padding:8px 14px;font-size:12px;color:#6b7280;margin:8px 0;">'
-        f'LLM Provider: <b style="color:#d1d5db">{PROVIDER.upper()}</b> &nbsp;|&nbsp; '
-        f'Model: <b style="color:#d1d5db">{model_label}</b> &nbsp;|&nbsp; '
-        f'Edit in <b style="color:#d1d5db">utils/qc_config.py</b></div>',
+        f'LLM Provider: <b style="color:#d1d5db">{provider.upper()}</b> &nbsp;|&nbsp; '
+        f'Model: <b style="color:#d1d5db">{model_label}</b></div>',
         unsafe_allow_html=True,
     )
     st.divider()
@@ -269,6 +269,10 @@ def render_ind_qc():
 
     st.markdown(" ")
 
+    model_config = get_llm_config()
+    if not model_config.get("api_key") and model_config.get("provider") == "groq":
+        st.warning("Please set your Groq API key in the sidebar LLM Configuration before generating quality checks.")
+
     # ── LLM controls ──────────────────────────────────────────────────────────
     llm_c1, llm_c2 = st.columns([4, 1])
     with llm_c1:
@@ -294,7 +298,7 @@ def render_ind_qc():
                         col_desc = dict(zip(tbl_rows["column_name"], tbl_rows["column_description"]))
                         for col in ctx_for_llm["columns"]:
                             col["description"] = col_desc.get(col["name"], "")
-                suggs = call_llm(ctx_for_llm, st.session_state.ind_qc_default_checks)
+                suggs = call_llm(ctx_for_llm, st.session_state.ind_qc_default_checks, model_config)
                 for chk in suggs:
                     chk["_original"] = {
                         "name":   chk.get("name"),
@@ -311,7 +315,7 @@ def render_ind_qc():
 
     if st.session_state.ind_qc_llm_error:
         st.error(f"LLM error: {st.session_state.ind_qc_llm_error}")
-        st.caption("Check your API key in utils/qc_config.py")
+        st.caption("Check your API key in the sidebar under LLM Configuration.")
     if st.session_state.ind_qc_llm_done and st.session_state.ind_qc_llm_suggestions:
         st.success(f"✅ {len(st.session_state.ind_qc_llm_suggestions)} LLM suggestions ready — tick what you want to include.")
 

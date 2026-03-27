@@ -1,24 +1,12 @@
 """
 utils/llm_measures.py
 LLM Measure Suggestion Engine
-
-Given a table name, its dimensions (columns), and optional table description,
-calls the configured LLM to suggest 3–5 meaningful measures with name, SQL
-expression, type, and description.
-
-Reuses the shared provider config from utils/description_engine/config.py.
 """
 
 import json
 import re
 
-from utils.description_engine.config import (
-    PROVIDER,
-    GROQ_API_KEY,
-    DEFAULT_GROQ_MODEL as GROQ_DEFAULT_MODEL,
-    OLLAMA_BASE_URL,
-    DEFAULT_OLLAMA_MODEL as OLLAMA_DEFAULT_MODEL,
-)
+# REMOVED: from utils.description_engine.config import ...
 
 # ── Valid measure types (must match what the Table YAML builder accepts) ──────
 MEASURE_TYPES = ["number", "count", "count_distinct", "sum", "avg", "min", "max", "string"]
@@ -139,12 +127,18 @@ def _parse_response(raw: str) -> list[dict]:
 # GROQ
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_groq(prompt: str) -> list[dict]:
+def _call_groq(prompt: str, model_config: dict) -> list[dict]:
     from groq import Groq
 
-    client = Groq(api_key=GROQ_API_KEY)
+    api_key = model_config.get("api_key")
+    model_name = model_config.get("model", "llama-3.1-8b-instant")
+    
+    if not api_key:
+        raise ValueError("Groq API Key is missing.")
+
+    client = Groq(api_key=api_key)
     response = client.chat.completions.create(
-        model=GROQ_DEFAULT_MODEL,
+        model=model_name,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": prompt},
@@ -159,11 +153,14 @@ def _call_groq(prompt: str) -> list[dict]:
 # OLLAMA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_ollama(prompt: str) -> list[dict]:
+def _call_ollama(prompt: str, model_config: dict) -> list[dict]:
     import urllib.request
 
+    base_url = model_config.get("base_url", "http://localhost:11434")
+    model_name = model_config.get("model", "llama3")
+
     payload = json.dumps({
-        "model":  OLLAMA_DEFAULT_MODEL,
+        "model":  model_name,
         "prompt": SYSTEM_PROMPT + "\n\n" + prompt,
         "stream": False,
         "format": "json",
@@ -171,7 +168,7 @@ def _call_ollama(prompt: str) -> list[dict]:
     }).encode()
 
     req = urllib.request.Request(
-        f"{OLLAMA_BASE_URL}/api/generate",
+        f"{base_url}/api/generate",
         data=payload,
         headers={"Content-Type": "application/json"},
     )
@@ -190,29 +187,20 @@ def suggest_measures(
     table_name:  str,
     dimensions:  list[dict],
     table_desc:  str = "",
+    model_config: dict = None, # ADDED
 ) -> list[dict]:
     """
     Call the configured LLM to suggest measures for a table.
-
-    Args:
-        table_name:  The table name.
-        dimensions:  List of dimension dicts, each with 'name'/'column' and 'type' keys.
-        table_desc:  Optional table description for richer context.
-
-    Returns:
-        List of measure dicts: [{"name", "sql", "type", "description"}, ...]
-        Returns [] on any failure — caller should handle gracefully.
-
-    Raises:
-        Nothing — all exceptions are caught and re-raised as RuntimeError
-        so the UI can show a friendly error message.
     """
+    if not model_config:
+        raise ValueError("LLM Config is missing. Please configure in the sidebar.")
+
     prompt = _build_prompt(table_name, dimensions, table_desc)
 
     try:
-        if PROVIDER == "groq":
-            return _call_groq(prompt)
+        if model_config.get("provider") == "groq":
+            return _call_groq(prompt, model_config)
         else:
-            return _call_ollama(prompt)
+            return _call_ollama(prompt, model_config)
     except Exception as e:
-        raise RuntimeError(f"Measure suggestion failed ({PROVIDER}): {e}") from e
+        raise RuntimeError(f"Measure suggestion failed: {e}") from e

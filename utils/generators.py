@@ -3,84 +3,104 @@ YAML and file generators for the Semantic Model.
 Used by: pages/1_CADP.py (Table YAML, View YAML, Lens Deployment builders)
 """
 
+from utils.error_logger import log_yaml_error, log_error, ErrorCategory
+
 
 def generate_table_yaml(table: dict) -> str:
-    """Generate Table YAML string from a table dict."""
-    lines = []
-    lines.append("tables:")
-    lines.append(f"  - name: {table['name']}")
-    lines.append(f"    sql: {{{{ load_sql('{table['name']}') }}}}")
-    if table.get("description", "").strip():
-        lines.append(f'    description: "{table["description"].strip()}"')
-    if not table.get("public", True):
-        lines.append("    public: false")
+    """Generate Table YAML string from a table dict with error handling."""
+    try:
+        if not table or not isinstance(table, dict):
+            raise ValueError("Table must be a non-empty dictionary")
+        
+        if not table.get('name', '').strip():
+            raise ValueError("Table name is required")
+        
+        lines = []
+        lines.append("tables:")
+        lines.append(f"  - name: {table['name']}")
+        lines.append(f"    sql: {{{{ load_sql('{table['name']}') }}}}")
+        
+        if table.get("description", "").strip():
+            lines.append(f'    description: "{table["description"].strip()}"')
+        if not table.get("public", True):
+            lines.append("    public: false")
 
-    if table.get("joins"):
-        valid = [j for j in table["joins"] if j.get("name", "").strip()]
-        if valid:
-            lines.append("")
-            lines.append("    joins:")
-            for j in valid:
-                lines.append(f"      - name: {j['name'].strip()}")
-                lines.append(f"        relationship: {j['relationship']}")
-                lines.append(f'        sql: "{j["sql"].strip()}"')
-
-    if table.get("dimensions"):
-        valid = [d for d in table["dimensions"] if d.get("name", "").strip()]
-        if valid:
-            lines.append("")
-            lines.append("    dimensions:")
-            for d in valid:
-                lines.append(f"      - name: {d['name'].strip()}")
-                lines.append(f"        type: {d['type']}")
-                col = d.get("column", "").strip() or d["name"].strip().upper()
-                lines.append(f"        column: {col}")
-                if d.get("description", "").strip():
-                    lines.append(f'        description: "{d["description"].strip()}"')
-                if d.get("primary_key"):
-                    lines.append("        primary_key: true")
-                if not d.get("public", True):
-                    lines.append("        public: false")
+        if table.get("joins"):
+            valid = [j for j in table["joins"] if j.get("name", "").strip()]
+            if valid:
                 lines.append("")
+                lines.append("    joins:")
+                for j in valid:
+                    lines.append(f"      - name: {j['name'].strip()}")
+                    lines.append(f"        relationship: {j['relationship']}")
+                    lines.append(f'        sql: "{j["sql"].strip()}"')
 
-    if table.get("measures"):
-        valid = [m for m in table["measures"] if m.get("name", "").strip()]
-        if valid:
-            lines.append("    measures:")
-            for m in valid:
-                lines.append(f"      - name: {m['name'].strip()}")
-                lines.append(f'        sql: "{m["sql"].strip()}"')
-                lines.append(f"        type: {m['type']}")
-                if m.get("description", "").strip():
-                    lines.append(f'        description: "{m["description"].strip()}"')
+        if table.get("dimensions"):
+            valid = [d for d in table["dimensions"] if d.get("name", "").strip()]
+            if valid:
                 lines.append("")
+                lines.append("    dimensions:")
+                for d in valid:
+                    lines.append(f"      - name: {d['name'].strip()}")
+                    lines.append(f"        type: {d['type']}")
+                    col = d.get("column", "").strip() or d["name"].strip().upper()
+                    lines.append(f"        column: {col}")
+                    if d.get("description", "").strip():
+                        lines.append(f'        description: "{d["description"].strip()}"')
+                    if d.get("primary_key"):
+                        lines.append("        primary_key: true")
+                    if not d.get("public", True):
+                        lines.append("        public: false")
+                    lines.append("")
 
-    if table.get("segments"):
-        valid = [s for s in table["segments"] if s.get("name", "").strip()]
-        if valid:
-            lines.append("    segments:")
-            for s in valid:
-                lines.append(f"      - name: {s['name'].strip()}")
-                lines.append(f'        sql: "{s["sql"].strip()}"')
-                if s.get("description", "").strip():
-                    lines.append(f"        description: {s['description'].strip()}")
-                inc = s.get("includes", [])
-                exc = s.get("excludes", [])
-                if inc or exc:
-                    lines.append("        meta:")
-                    lines.append("          secure:")
-                    lines.append("            user_groups:")
-                    if inc:
-                        lines.append("              includes:")
-                        for g in inc:
-                            lines.append(f"                - {g}")
-                    if exc:
-                        lines.append("              excludes:")
-                        for g in exc:
-                            lines.append(f"                - {g}")
-                lines.append("")
+        if table.get("measures"):
+            valid = [m for m in table["measures"] if m.get("name", "").strip()]
+            if valid:
+                lines.append("    measures:")
+                for m in valid:
+                    lines.append(f"      - name: {m['name'].strip()}")
+                    lines.append(f'        sql: "{m["sql"].strip()}"')
+                    lines.append(f"        type: {m['type']}")
+                    if m.get("description", "").strip():
+                        lines.append(f'        description: "{m["description"].strip()}"')
+                    lines.append("")
 
-    return "\n".join(lines)
+        if table.get("segments"):
+            valid = [s for s in table["segments"] if s.get("name", "").strip()]
+            if valid:
+                lines.append("    segments:")
+                for s in valid:
+                    lines.append(f"      - name: {s['name'].strip()}")
+                    lines.append(f'        sql: "{s["sql"].strip()}"')
+                    if s.get("description", "").strip():
+                        lines.append(f"        description: {s['description'].strip()}")
+                    inc = s.get("includes", [])
+                    exc = s.get("excludes", [])
+                    if inc or exc:
+                        lines.append("        meta:")
+                        lines.append("          secure:")
+                        lines.append("            user_groups:")
+                        if inc:
+                            lines.append("              includes:")
+                            for g in inc:
+                                lines.append(f"                - {g}")
+                        if exc:
+                            lines.append("              excludes:")
+                            for g in exc:
+                                lines.append(f"                - {g}")
+                    lines.append("")
+
+        yaml_output = "\n".join(lines)
+        
+        # Basic YAML validation
+        if not yaml_output.strip().startswith("tables:"):
+            raise ValueError("Generated YAML is missing 'tables:' root key")
+        
+        return yaml_output
+    
+    except Exception as e:
+        log_yaml_error(f"Failed to generate table YAML: {str(e)}", exception=e)
+        raise
 
 
 def generate_view_yaml(view: dict) -> str:

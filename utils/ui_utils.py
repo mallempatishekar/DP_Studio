@@ -4,21 +4,74 @@ Loads the global CSS design system and provides reusable HTML components.
 """
 
 import os
+import json
+import uuid
+import logging
 import streamlit as st
+from pathlib import Path
+
+# ── Logging setup ────────────────────────────────────────────────────────────
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / "app.log"
+
+logger = logging.getLogger("dp_generator")
+if not logger.handlers:
+    handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+
+def get_user_id() -> str:
+    if "dp_user_id" not in st.session_state:
+        st.session_state.dp_user_id = str(uuid.uuid4())
+    return st.session_state.dp_user_id
+
+
+def log_event(level: str, message: str, **context):
+    user_id = get_user_id()
+    extra = {"user_id": user_id, **context}
+    text = f"{message} | {json.dumps(extra, default=str)}"
+    if level.lower() == "info":
+        logger.info(text)
+    elif level.lower() == "warning":
+        logger.warning(text)
+    elif level.lower() == "error":
+        logger.error(text)
+    else:
+        logger.debug(text)
 
 
 def _clear_nav_state():
-    """Clear all flow-specific session state keys before navigating."""
     for _k in ["sm_mode", "sm_origin", "semantic_section",
                 "dp_origin", "dp_step", "dp_entry_step",
                 "depot_origin", "depot_specific_file", "flare_origin",
                 "cadp_qc_origin", "sadp_qc_origin"]:
         st.session_state.pop(_k, None)
 
+# --- Callback for Reset Button (Must be defined before usage) ---
+def _reset_model_callback():
+    """Callback to reset model to default."""
+    st.session_state.groq_model_name = "llama-3.3-70b-versatile"
+    # Note: No st.rerun() needed here, Streamlit reruns automatically after callback
 
 def render_sidebar():
-    """Render the persistent sidebar with title, Home and History navigation."""
+    # Initialize all LLM config keys at the start to ensure persistence
+    if "llm_provider" not in st.session_state:
+        st.session_state.llm_provider = "groq"
+    if "groq_api_key" not in st.session_state:
+        st.session_state.groq_api_key = os.getenv("GROQ_API_KEY", "")
+    if "groq_model_name" not in st.session_state:
+        st.session_state.groq_model_name = "llama-3.3-70b-versatile"
+    if "ollama_base_url" not in st.session_state:
+        st.session_state.ollama_base_url = "http://localhost:11434"
+    if "ollama_model_name" not in st.session_state:
+        st.session_state.ollama_model_name = "llama3"
+    
     with st.sidebar:
+        # --- Title ---
         st.markdown(
             '<div style="padding:16px 8px 8px 8px;">'
             '<p style="font-size:16px;font-weight:700;color:#f3f4f6;margin:0;letter-spacing:-0.01em;">'
@@ -31,21 +84,99 @@ def render_sidebar():
             '<div style="border-top:1px solid #1f2937;margin:8px 0 12px 0;"></div>',
             unsafe_allow_html=True,
         )
+        
+        # --- Navigation ---
         if st.button("🏠  Home", key="sb_home", use_container_width=True):
             _clear_nav_state()
             st.switch_page("app.py")
         if st.button("🕓  History", key="sb_history", use_container_width=True):
             st.switch_page("pages/10_History.py")
+
+        # --- LLM Configuration Section ---
+        st.markdown('<div style="border-top:1px solid #1f2937;margin:16px 0 12px 0;"></div>', unsafe_allow_html=True)
+        with st.expander("🤖 LLM Configuration", expanded=False):
+            
+            # 1. Provider Selection
+            provider = st.selectbox(  
+                "Provider", 
+                ["groq", "ollama"], 
+                key="llm_provider",
+                help="Select 'groq' for cloud or 'ollama' for local models."
+            )
+
+            if provider == "groq":
+                # API Key — use key only, no value parameter for persistence
+                st.text_input(
+                    "Groq API Key", 
+                    type="password", 
+                    key="groq_api_key",
+                    help="Enter your Groq API Key (gsk_...)"
+                )
+                
+                # Model List - Optimized for YAML/SQL generation
+                groq_models = [
+                    "llama-3.3-70b-versatile",      # Best for complex code generation (70B)
+                    "mixtral-8x7b-32768",           # Excellent for code tasks, good balance of quality & speed
+                    "llama-3.1-70b-versatile",      # Alternative 70B model with good code generation
+                    "llama-3.1-8b-instant",         # Quick operations (lower quality but fast)
+                ]
+                
+                # --- SAFE DEFAULT LOGIC (BEFORE WIDGET) ---
+                # If key invalid (ghost value), update it NOW
+                if st.session_state.groq_model_name not in groq_models:
+                    st.session_state.groq_model_name = groq_models[0]
+                
+                # Create Widget
+                st.selectbox( 
+                    "Model",
+                    groq_models,
+                    key="groq_model_name"
+                )
+                
+                # Reset Button using Callback (Prevents Exception)
+                st.button("🔄 Reset to Default Model", on_click=_reset_model_callback, key="reset_model_btn")
+
+            else:
+                # Ollama Logic
+                st.text_input(
+                    "Base URL", 
+                    key="ollama_base_url"
+                )
+                st.text_input(
+                    "Model Name", 
+                    key="ollama_model_name"
+                )
+            st.caption("Settings apply globally for this session.")
+
+def get_llm_config() -> dict:
+    provider = st.session_state.get("llm_provider", "groq")
+
+    # Persist by default across pages; fallback to environment if not set in UI.
+    groq_api_key = st.session_state.get("groq_api_key", "") or os.getenv("GROQ_API_KEY", "")
+    ollama_base_url = st.session_state.get("ollama_base_url", "http://localhost:11434")
+    groq_model_name = st.session_state.get("groq_model_name", "llama-3.1-8b-instant")
+    ollama_model_name = st.session_state.get("ollama_model_name", "llama3")
+
+    if provider == "groq":
+        return {
+            "provider": "groq",
+            "api_key": groq_api_key,
+            "model": groq_model_name,
+        }
+    else:
+        return {
+            "provider": "ollama",
+            "base_url": ollama_base_url,
+            "model": ollama_model_name,
+        }
+
 def load_global_css():
-    """Inject the global CSS design system."""
     css_path = os.path.join(os.path.dirname(__file__), "..", "assets", "style.css")
     try:
         with open(css_path, "r", encoding="utf-8") as f:
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
     except FileNotFoundError:
         pass
-
-    # Hide Streamlit's auto-generated page navigation list only
     st.markdown("""
         <style>
             [data-testid="stSidebarNav"] { display: none !important; }
@@ -53,40 +184,30 @@ def load_global_css():
     """, unsafe_allow_html=True)
 
 
-
 def section_header(icon: str, title: str):
-    """Render a styled section header with left accent border."""
     st.markdown(
         f'<div class="section-header"><span>{icon}</span><h4>{title}</h4></div>',
         unsafe_allow_html=True,
     )
 
-
 def group_label(title: str, dot_class: str = "dot-blue"):
-    """Render a category group label with a colored dot."""
     st.markdown(
         f'<div class="group-label"><span class="dot {dot_class}"></span>{title}</div>',
         unsafe_allow_html=True,
     )
 
-
 def yaml_tab(filename: str):
-    """Render a code-editor-style tab bar above a YAML preview block."""
     st.markdown(
         f'<div class="yaml-tab"><span class="yaml-dot"></span>{filename}</div>',
         unsafe_allow_html=True,
     )
 
-
 def app_footer():
-    """Render the app footer."""
     st.markdown(
         '<div class="app-footer">⚙️ &nbsp; Internal Automation Tool — YAML & SQL Generation</div>',
         unsafe_allow_html=True,
     )
 
-
-# ── Docs URL registry ─────────────────────────────────────────────────────────
 DOCS_URLS = {
     "lens":        ("Lens Docs",        "https://dataos.info/resources/lens/"),
     "segments":    ("Segments Docs",    "https://dataos.info/resources/lens/segments/"),
@@ -100,13 +221,7 @@ DOCS_URLS = {
     "dp_learn":    ("DP Learn Track",   "https://dataos.info/learn/dp_developer_learn_track/"),
 }
 
-
 def floating_docs(*keys: str):
-    """Render a floating docs button (bottom-right).
-    Pass one key for a single button, multiple keys for a multi-link panel.
-    Keys must be from DOCS_URLS registry.
-    """
-    # Build CSS only once per render (idempotent — browsers deduplicate)
     css = """
 <style>
 .floating-docs {
@@ -136,9 +251,7 @@ def floating_docs(*keys: str):
         unsafe_allow_html=True,
     )
 
-
 def inline_docs_banner(*keys: str):
-    """Render a compact inline docs link bar (useful inside step wizards)."""
     links = " &nbsp;·&nbsp; ".join(
         f'<a href="{DOCS_URLS[k][1]}" target="_blank" '
         f'style="color:#60a5fa;font-size:12px;text-decoration:none;">📖 {DOCS_URLS[k][0]}</a>'

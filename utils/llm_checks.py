@@ -11,11 +11,9 @@ Supports:
 
 import json
 import re
-from utils.qc_config import (
-    PROVIDER, GROQ_API_KEY, GROQ_DEFAULT_MODEL,
-    OLLAMA_BASE_URL, OLLAMA_DEFAULT_MODEL,
-)
 import pathlib
+
+from utils.ui_utils import get_llm_config, log_event, get_user_id
 
 REFERENCE_PATH = pathlib.Path("utils/qc_reference_library.yaml")
 LEARNED_PATH = pathlib.Path("utils/qc_learning/reference_qc_rules.json")
@@ -500,20 +498,37 @@ _FAKE_VALUES = {
     "your_value", "sample_value", "none", "null", "tbd"
 }
 
-def call_llm(ctx: dict, default_checks: list[dict]) -> list[dict]:
+def call_llm(ctx: dict, default_checks: list[dict], model_config: dict = None) -> list[dict]:
+    """
+    Generate QC suggestions using LLM.
+    
+    Args:
+        ctx: Context dict with table/column info
+        default_checks: Default checks list
+        model_config: LLM configuration (provider, api_key, model, base_url, etc.)
+                      If None, will attempt to use from environment.
+    """
+    if model_config is None or not isinstance(model_config, dict):
+        model_config = get_llm_config()
+
+    # Keep user id context for logging
+    user_id = get_user_id()
 
     prompt = build_prompt(ctx, default_checks)
+    log_event("info", "LLM request started", user_id=user_id, provider=model_config.get("provider"))
 
     # Get LLM suggestions
     try:
-        if PROVIDER == "groq":
-            suggestions = _call_groq(prompt)
+        provider = model_config.get("provider", "groq")
+        if provider == "groq":
+            suggestions = _call_groq(prompt, model_config)
         else:
-            suggestions = _call_ollama(prompt)
-    except RuntimeError:
-        raise  # pass rate limit errors up to the UI
+            suggestions = _call_ollama(prompt, model_config)
+    except RuntimeError as e:
+        log_event("error", "LLM rate-limit error", user_id=user_id, error=str(e))
+        raise
     except Exception as e:
-        print(f"⚠️ LLM call failed: {e}")
+        log_event("error", "LLM call failed", user_id=user_id, error=str(e))
         suggestions = []
 
     if suggestions is None:
@@ -840,14 +855,19 @@ def _parse_response(raw: str) -> list[dict]:
 # GROQ
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_groq(prompt: str) -> list[dict]:
+def _call_groq(prompt: str, model_config: dict) -> list[dict]:
     from groq import Groq
 
-    client = Groq(api_key=GROQ_API_KEY)
+    api_key = model_config.get("api_key", "")
+    if not api_key:
+        raise ValueError("Groq API key is required. Please set it in the LLM Configuration panel.")
+    
+    client = Groq(api_key=api_key)
 
     fallback = "llama-3.1-8b-instant"
-    models_to_try = [GROQ_DEFAULT_MODEL]
-    if GROQ_DEFAULT_MODEL != fallback:
+    model_name = model_config.get("model", fallback)
+    models_to_try = [model_name]
+    if model_name != fallback:
         models_to_try.append(fallback)
 
     last_err = None
@@ -881,18 +901,21 @@ def _call_groq(prompt: str) -> list[dict]:
 # OLLAMA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_ollama(prompt: str) -> list[dict]:
+def _call_ollama(prompt: str, model_config: dict) -> list[dict]:
     import urllib.request
 
+    base_url = model_config.get("base_url", "http://localhost:11434")
+    model_name = model_config.get("model", "llama3")
+
     payload = json.dumps({
-        "model": OLLAMA_DEFAULT_MODEL,
+        "model": model_name,
         "prompt": SYSTEM_PROMPT + "\n\n" + prompt,
         "stream": False,
         "options": {"temperature": 0.1},
     }).encode()
 
     req = urllib.request.Request(
-        f"{OLLAMA_BASE_URL}/api/generate",
+        f"{base_url}/api/generate",
         data=payload,
         headers={"Content-Type": "application/json"},
     )

@@ -4,6 +4,7 @@ Used by: pages/1_CADP.py (Semantic Model builders)
 """
 
 import streamlit as st
+from utils.error_logger import log_snowflake_error
 
 
 def sf_map_type(sf_type: str) -> str:
@@ -32,40 +33,92 @@ def sf_get_connection():
 
 
 def sf_connect(account, user, password, role, warehouse):
+    """
+    Connect to Snowflake with error handling.
+    Returns connection object or None if connection fails.
+    """
     import snowflake.connector
-    kwargs = {"account": account, "user": user, "password": password}
-    if role.strip():      kwargs["role"]      = role.strip()
-    if warehouse.strip(): kwargs["warehouse"] = warehouse.strip()
-    return snowflake.connector.connect(**kwargs)
+    try:
+        kwargs = {"account": account, "user": user, "password": password}
+        if role.strip():      kwargs["role"]      = role.strip()
+        if warehouse.strip(): kwargs["warehouse"] = warehouse.strip()
+        return snowflake.connector.connect(**kwargs)
+    except Exception as e:
+        log_snowflake_error(
+            f"Failed to connect to Snowflake account '{account}'",
+            exception=e
+        )
+        return None
 
 
 def sf_fetch_databases(conn):
-    cur = conn.cursor()
-    cur.execute("SHOW DATABASES")
-    rows = cur.fetchall()
-    return [r[1] for r in rows]
+    """Fetch list of databases with error handling."""
+    if not conn:
+        log_snowflake_error("Connection object is None or invalid")
+        return []
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("SHOW DATABASES")
+        rows = cur.fetchall()
+        return [r[1] for r in rows]
+    except Exception as e:
+        log_snowflake_error("Failed to fetch databases", exception=e)
+        return []
 
 
 def sf_fetch_schemas(conn, database):
-    cur = conn.cursor()
-    cur.execute(f'SHOW SCHEMAS IN DATABASE "{database}"')
-    rows = cur.fetchall()
-    return [r[1] for r in rows if r[1] != "INFORMATION_SCHEMA"]
+    """Fetch schemas for a database with error handling."""
+    if not conn:
+        log_snowflake_error("Connection object is None or invalid")
+        return []
+    
+    try:
+        cur = conn.cursor()
+        cur.execute(f'SHOW SCHEMAS IN DATABASE "{database}"')
+        rows = cur.fetchall()
+        return [r[1] for r in rows if r[1] != "INFORMATION_SCHEMA"]
+    except Exception as e:
+        log_snowflake_error(f"Failed to fetch schemas from database '{database}'", exception=e)
+        return []
 
 
 def sf_fetch_tables(conn, database, schema):
-    cur = conn.cursor()
-    cur.execute(f'SHOW TABLES IN SCHEMA "{database}"."{schema}"')
-    rows = cur.fetchall()
-    return [r[1] for r in rows]
+    """Fetch tables for a schema with error handling."""
+    if not conn:
+        log_snowflake_error("Connection object is None or invalid")
+        return []
+    
+    try:
+        cur = conn.cursor()
+        cur.execute(f'SHOW TABLES IN SCHEMA "{database}"."{schema}"')
+        rows = cur.fetchall()
+        return [r[1] for r in rows]
+    except Exception as e:
+        log_snowflake_error(f"Failed to fetch tables from '{database}.{schema}'", exception=e)
+        return []
 
 
 def sf_fetch_columns(conn, database, schema, table):
-    """Return list of dicts: {original, snowflake_type, mapped_type}"""
-    cur = conn.cursor()
-    cur.execute(f'DESCRIBE TABLE "{database}"."{schema}"."{table}"')
-    rows = cur.fetchall()
-    return [
-        {"original": r[0], "snowflake_type": r[1], "mapped_type": sf_map_type(r[1])}
-        for r in rows
-    ]
+    """
+    Return list of dicts: {original, snowflake_type, mapped_type}
+    With error handling.
+    """
+    if not conn:
+        log_snowflake_error("Connection object is None or invalid")
+        return []
+    
+    try:
+        cur = conn.cursor()
+        cur.execute(f'DESCRIBE TABLE "{database}"."{schema}"."{table}"')
+        rows = cur.fetchall()
+        return [
+            {"original": r[0], "snowflake_type": r[1], "mapped_type": sf_map_type(r[1])}
+            for r in rows
+        ]
+    except Exception as e:
+        log_snowflake_error(
+            f"Failed to fetch columns from '{database}.{schema}.{table}'",
+            exception=e
+        )
+        return []

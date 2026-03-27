@@ -13,6 +13,7 @@ from openpyxl.styles import (
     Font, PatternFill, Alignment, Border, Side, Protection
 )
 from openpyxl.utils import get_column_letter
+from utils.error_logger import log_error, ErrorCategory, log_quality_check_failure
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 COL_HEADER_BG  = "1E3A5F"   # dark blue header
@@ -43,164 +44,182 @@ def build_default_checks(dims, table_name):
     dims: list of dicts with keys name, type, primary_key
     Returns list of row-dicts ready for Excel / display.
     """
-    rows = []
+    try:
+        if not dims or not isinstance(dims, list):
+            log_error(ErrorCategory.DATA_VALIDATION_ERROR, "Dimensions must be a non-empty list")
+            return []
+        
+        rows = []
 
-    # Table-level checks always first
-    rows.append({
-        "column_name":    "(table-level)",
-        "dataos_type":    "",
-        "default_checks": "row_count=0 | schema",
-        "custom_checks":  "",
-    })
-
-    for d in dims:
-        name    = d.get("name", "").strip()
-        dtype   = d.get("type", "string")
-        is_pk   = d.get("primary_key", False)
-        if not name:
-            continue
+        # Table-level checks always first
         rows.append({
-            "column_name":    name,
-            "dataos_type":    dtype,
-            "default_checks": _default_checks_for_col(name, dtype, is_pk),
+            "column_name":    "(table-level)",
+            "dataos_type":    "",
+            "default_checks": "row_count=0 | schema",
             "custom_checks":  "",
         })
-    return rows
+
+        for d in dims:
+            name    = d.get("name", "").strip()
+            dtype   = d.get("type", "string")
+            is_pk   = d.get("primary_key", False)
+            if not name:
+                continue
+            rows.append({
+                "column_name":    name,
+                "dataos_type":    dtype,
+                "default_checks": _default_checks_for_col(name, dtype, is_pk),
+                "custom_checks":  "",
+            })
+        return rows
+    
+    except Exception as e:
+        log_error(ErrorCategory.DATA_VALIDATION_ERROR, f"Failed to build default checks: {str(e)}", exception=e)
+        return []
 
 
 # ── Excel generator ───────────────────────────────────────────────────────────
 def generate_qc_excel(dims, table_name):
     """Generate a formatted, partially-locked Excel workbook. Returns bytes."""
-    rows = build_default_checks(dims, table_name)
+    try:
+        rows = build_default_checks(dims, table_name)
+        
+        if not rows:
+            log_quality_check_failure("generate_qc_excel", "No rows to generate", severity="error")
+            return b""
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Quality Checks"
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Quality Checks"
 
-    # ── Column widths ─────────────────────────────────────────────────────────
-    ws.column_dimensions["A"].width = 22   # column_name
-    ws.column_dimensions["B"].width = 14   # dataos_type
-    ws.column_dimensions["C"].width = 48   # default_checks
-    ws.column_dimensions["D"].width = 60   # custom_checks
+        # ── Column widths ─────────────────────────────────────────────────────
+        ws.column_dimensions["A"].width = 22   # column_name
+        ws.column_dimensions["B"].width = 14   # dataos_type
+        ws.column_dimensions["C"].width = 48   # default_checks
+        ws.column_dimensions["D"].width = 60   # custom_checks
 
-    # ── Header row ────────────────────────────────────────────────────────────
-    headers = ["column_name", "dataos_type", "default_checks", "custom_checks ✏️"]
-    header_fill  = PatternFill("solid", fgColor=COL_HEADER_BG)
-    header_font  = Font(bold=True, color=COL_WHITE, name="Arial", size=11)
-    locked_fill  = PatternFill("solid", fgColor=COL_LOCKED_BG)
-    edit_fill    = PatternFill("solid", fgColor=COL_EDIT_BG)
-    locked_font  = Font(name="Arial", size=10, color="444444")
-    edit_font    = Font(name="Arial", size=10, color="1A1A1A")
+        # ── Header row ────────────────────────────────────────────────────────
+        headers = ["column_name", "dataos_type", "default_checks", "custom_checks ✏️"]
+        header_fill  = PatternFill("solid", fgColor=COL_HEADER_BG)
+        header_font  = Font(bold=True, color=COL_WHITE, name="Arial", size=11)
+        locked_fill  = PatternFill("solid", fgColor=COL_LOCKED_BG)
+        edit_fill    = PatternFill("solid", fgColor=COL_EDIT_BG)
+        locked_font  = Font(name="Arial", size=10, color="444444")
+        edit_font    = Font(name="Arial", size=10, color="1A1A1A")
 
-    for ci, h in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=ci, value=h)
-        cell.font      = header_font
-        cell.fill      = header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border    = BORDER
-    ws.row_dimensions[1].height = 28
-
-    # ── Instruction row ───────────────────────────────────────────────────────
-    instr_fill = PatternFill("solid", fgColor="FFF9C4")
-    instr_font = Font(italic=True, color="555555", name="Arial", size=9)
-    instructions = [
-        "Do not edit",
-        "Do not edit",
-        "Pre-filled defaults — do not edit",
-        "Add custom checks using pipe | separator.\n"
-        "Examples:\n"
-        "  missing_count=5\n"
-        "  duplicate_count=0\n"
-        "  freshness=1d\n"
-        "  valid_values=CASH,CARD,UPI\n"
-        "  min=0 | max=999999\n"
-        "  regex=^[A-Z]{3}$\n"
-        "  failed_rows=amount != price * qty",
-    ]
-    for ci, txt in enumerate(instructions, start=1):
-        cell = ws.cell(row=2, column=ci, value=txt)
-        cell.font      = instr_font
-        cell.fill      = instr_fill
-        cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-        cell.border    = BORDER
-    ws.row_dimensions[2].height = 100
-
-    # ── Data rows ─────────────────────────────────────────────────────────────
-    for ri, row in enumerate(rows, start=3):
-        is_table_level = row["column_name"] == "(table-level)"
-        row_bg = COL_TABLE_BG if is_table_level else (COL_WHITE if ri % 2 == 1 else COL_ALT)
-        row_fill = PatternFill("solid", fgColor=row_bg)
-
-        for ci, key in enumerate(["column_name", "dataos_type", "default_checks", "custom_checks"], start=1):
-            cell = ws.cell(row=ri, column=ci, value=row[key])
+        for ci, h in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=ci, value=h)
+            cell.font      = header_font
+            cell.fill      = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border    = BORDER
-            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+        ws.row_dimensions[1].height = 28
 
-            if ci <= 3:
-                # Locked columns — styled grey
-                cell.fill = PatternFill("solid", fgColor=COL_LOCKED_BG if not is_table_level else COL_TABLE_BG)
-                cell.font = Font(name="Arial", size=10, color="333333")
-            else:
-                # Editable custom_checks column
-                cell.fill = PatternFill("solid", fgColor=COL_EDIT_BG)
-                cell.font = edit_font
-        ws.row_dimensions[ri].height = 20
-
-    # ── Freeze header rows ────────────────────────────────────────────────────
-    ws.freeze_panes = "A3"
-
-    # ── Legend sheet ─────────────────────────────────────────────────────────
-    leg = wb.create_sheet("Legend & Syntax")
-    leg.column_dimensions["A"].width = 22
-    leg.column_dimensions["B"].width = 55
-
-    leg_header_fill = PatternFill("solid", fgColor=COL_HEADER_BG)
-    leg_hdr_font    = Font(bold=True, color=COL_WHITE, name="Arial", size=11)
-
-    leg_rows = [
-        ("Keyword",         "What it does"),
-        ("missing_count=N", "Null/missing values must be ≤ N  (e.g. missing_count=0)"),
-        ("missing_percent=N","Missing % must be ≤ N  (e.g. missing_percent=5)"),
-        ("duplicate_count=N","Duplicate rows must be ≤ N  (e.g. duplicate_count=0)"),
-        ("duplicate_percent=N","Duplicate % must be ≤ N"),
-        ("freshness=Nd",    "Data must not be older than N days  (e.g. freshness=7d)"),
-        ("valid_values=A,B,C","Column must only contain listed values (comma-separated)"),
-        ("min=N",           "Numeric column minimum value  (e.g. min=0)"),
-        ("max=N",           "Numeric column maximum value  (e.g. max=999999)"),
-        ("regex=PATTERN",   "Column must match this regex pattern"),
-        ("failed_rows=SQL", "Custom SQL condition — rows where condition is TRUE fail"),
-        ("",                ""),
-        ("Separator",       "Use  |  (pipe) to add multiple checks on one column"),
-        ("Example",         "missing_count=0 | valid_values=CASH,CARD,UPI | min=0"),
-        ("",                ""),
-        ("Notes",           "Do NOT edit column_name, dataos_type or default_checks columns"),
-        ("",                "Only fill the custom_checks column (yellow)"),
-        ("",                "Do not use | inside failed_rows — use OR instead of ||"),
-    ]
-
-    for ri, (kw, desc) in enumerate(leg_rows, start=1):
-        is_header = ri == 1
-        kw_cell   = leg.cell(row=ri, column=1, value=kw)
-        desc_cell = leg.cell(row=ri, column=2, value=desc)
-        for cell in (kw_cell, desc_cell):
+        # ── Instruction row ───────────────────────────────────────────────────
+        instr_fill = PatternFill("solid", fgColor="FFF9C4")
+        instr_font = Font(italic=True, color="555555", name="Arial", size=9)
+        instructions = [
+            "Do not edit",
+            "Do not edit",
+            "Pre-filled defaults — do not edit",
+            "Add custom checks using pipe | separator.\n"
+            "Examples:\n"
+            "  missing_count=5\n"
+            "  duplicate_count=0\n"
+            "  freshness=1d\n"
+            "  valid_values=CASH,CARD,UPI\n"
+            "  min=0 | max=999999\n"
+            "  regex=^[A-Z]{3}$\n"
+            "  failed_rows=amount != price * qty",
+        ]
+        for ci, txt in enumerate(instructions, start=1):
+            cell = ws.cell(row=2, column=ci, value=txt)
+            cell.font      = instr_font
+            cell.fill      = instr_fill
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
             cell.border    = BORDER
-            cell.alignment = Alignment(horizontal="left", vertical="center")
-            if is_header:
-                cell.fill = leg_header_fill
-                cell.font = leg_hdr_font
-            elif kw == "":
-                cell.fill = PatternFill("solid", fgColor=COL_WHITE)
-                cell.font = Font(name="Arial", size=10)
-            else:
-                cell.fill = PatternFill("solid", fgColor=COL_ALT if ri % 2 == 0 else COL_WHITE)
-                cell.font = Font(name="Arial", size=10,
-                                 bold=(kw in ("Separator", "Example", "Notes")))
-        leg.row_dimensions[ri].height = 18
+        ws.row_dimensions[2].height = 100
 
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
+        # ── Data rows ─────────────────────────────────────────────────────────
+        for ri, row in enumerate(rows, start=3):
+            is_table_level = row["column_name"] == "(table-level)"
+            row_bg = COL_TABLE_BG if is_table_level else (COL_WHITE if ri % 2 == 1 else COL_ALT)
+            row_fill = PatternFill("solid", fgColor=row_bg)
+
+            for ci, key in enumerate(["column_name", "dataos_type", "default_checks", "custom_checks"], start=1):
+                cell = ws.cell(row=ri, column=ci, value=row[key])
+                cell.border    = BORDER
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+
+                if ci <= 3:
+                    # Locked columns — styled grey
+                    cell.fill = PatternFill("solid", fgColor=COL_LOCKED_BG if not is_table_level else COL_TABLE_BG)
+                    cell.font = Font(name="Arial", size=10, color="333333")
+                else:
+                    # Editable custom_checks column
+                    cell.fill = PatternFill("solid", fgColor=COL_EDIT_BG)
+                    cell.font = edit_font
+            ws.row_dimensions[ri].height = 20
+
+        # ── Freeze header rows ────────────────────────────────────────────────
+        ws.freeze_panes = "A3"
+
+        # ── Legend sheet ─────────────────────────────────────────────────────
+        leg = wb.create_sheet("Legend & Syntax")
+        leg.column_dimensions["A"].width = 22
+        leg.column_dimensions["B"].width = 55
+
+        leg_header_fill = PatternFill("solid", fgColor=COL_HEADER_BG)
+        leg_hdr_font    = Font(bold=True, color=COL_WHITE, name="Arial", size=11)
+
+        leg_rows = [
+            ("Keyword",         "What it does"),
+            ("missing_count=N", "Null/missing values must be ≤ N  (e.g. missing_count=0)"),
+            ("missing_percent=N","Missing % must be ≤ N  (e.g. missing_percent=5)"),
+            ("duplicate_count=N","Duplicate rows must be ≤ N  (e.g. duplicate_count=0)"),
+            ("duplicate_percent=N","Duplicate % must be ≤ N"),
+            ("freshness=Nd",    "Data must not be older than N days  (e.g. freshness=7d)"),
+            ("valid_values=A,B,C","Column must only contain listed values (comma-separated)"),
+            ("min=N",           "Numeric column minimum value  (e.g. min=0)"),
+            ("max=N",           "Numeric column maximum value  (e.g. max=999999)"),
+            ("regex=PATTERN",   "Column must match this regex pattern"),
+            ("failed_rows=SQL", "Custom SQL condition — rows where condition is TRUE fail"),
+            ("",                ""),
+            ("Separator",       "Use  |  (pipe) to add multiple checks on one column"),
+            ("Example",         "missing_count=0 | valid_values=CASH,CARD,UPI | min=0"),
+            ("",                ""),
+            ("Notes",           "Do NOT edit column_name, dataos_type or default_checks columns"),
+            ("",                "Only fill the custom_checks column (yellow)"),
+            ("",                "Do not use | inside failed_rows — use OR instead of ||"),
+        ]
+
+        for ri, (kw, desc) in enumerate(leg_rows, start=1):
+            is_header = ri == 1
+            kw_cell   = leg.cell(row=ri, column=1, value=kw)
+            desc_cell = leg.cell(row=ri, column=2, value=desc)
+            for cell in (kw_cell, desc_cell):
+                cell.border    = BORDER
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+                if is_header:
+                    cell.fill = leg_header_fill
+                    cell.font = leg_hdr_font
+                elif kw == "":
+                    cell.fill = PatternFill("solid", fgColor=COL_WHITE)
+                    cell.font = Font(name="Arial", size=10)
+                else:
+                    cell.fill = PatternFill("solid", fgColor=COL_ALT if ri % 2 == 0 else COL_WHITE)
+                    cell.font = Font(name="Arial", size=10,
+                                     bold=(kw in ("Separator", "Example", "Notes")))
+            leg.row_dimensions[ri].height = 18
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.read()
+    
+    except Exception as e:
+        log_error(ErrorCategory.FILE_DOWNLOAD_ERROR, f"Failed to generate QC Excel: {str(e)}", exception=e)
+        return b""
 
 
 # ── Custom check parser ───────────────────────────────────────────────────────

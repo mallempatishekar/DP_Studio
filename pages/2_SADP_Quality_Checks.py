@@ -22,7 +22,7 @@ from utils.qc_learning.save_learning import save_reference_rules
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from utils.ui_utils import load_global_css, render_sidebar, section_header, app_footer
+from utils.ui_utils import load_global_css, render_sidebar, section_header, app_footer, get_llm_config
 from utils.sf_utils import (
     connect, fetch_databases, fetch_schemas,
     fetch_tables, fetch_full_context, fetch_schema_overview,
@@ -30,7 +30,7 @@ from utils.sf_utils import (
 from utils.default_checks import generate_default_checks
 from utils.llm_checks import call_llm
 from utils.qc_yaml_generator import generate_qc_yaml
-from utils.qc_config import PROVIDER, GROQ_DEFAULT_MODEL, OLLAMA_DEFAULT_MODEL
+from utils.history import save_entry
 
 st.set_page_config(page_title="SADP — Quality Checks", page_icon="✅", layout="wide")
 load_global_css()
@@ -137,13 +137,14 @@ with nav_r:
             st.session_state[k] = _QC_DEFAULTS[k]
         st.rerun()
 
-model_label = GROQ_DEFAULT_MODEL if PROVIDER == "groq" else OLLAMA_DEFAULT_MODEL
+model_config = get_llm_config()
+provider = model_config.get("provider", "groq")
+model_label = model_config.get("model", "llama-3.1-8b-instant")
 st.markdown(
     f'<div style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:8px;'
     f'padding:8px 14px;font-size:12px;color:#6b7280;margin:8px 0;">'
-    f'⚙️ LLM Provider: <b style="color:#374151">{PROVIDER.upper()}</b> &nbsp;|&nbsp; '
-    f'Model: <b style="color:#374151">{model_label}</b> &nbsp;|&nbsp; '
-    f'Edit in <b style="color:#374151">utils/qc_config.py</b></div>',
+    f'⚙️ LLM Provider: <b style="color:#374151">{provider.upper()}</b> &nbsp;|&nbsp; '
+    f'Model: <b style="color:#374151">{model_label}</b></div>',
     unsafe_allow_html=True,
 )
 st.divider()
@@ -482,7 +483,10 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
             st.session_state.sadp_qc_llm_error       = None
             st.rerun()
 
-    if run_llm and not st.session_state.sadp_qc_llm_done:
+    model_config = get_llm_config()
+    if not model_config.get("api_key") and model_config.get("provider") == "groq":
+        st.warning("Please set your Groq API key in the sidebar LLM Configuration before generating quality checks.")
+    elif run_llm and not st.session_state.sadp_qc_llm_done:
         with st.spinner("Calling LLM..."):
             try:
                 ctx_for_llm = ctx.copy()
@@ -495,7 +499,7 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                         for col in ctx_for_llm["columns"]:
                             col["description"] = col_desc.get(col["name"], "")
                 try:
-                    suggs = call_llm(ctx_for_llm, st.session_state.sadp_qc_default_checks)
+                    suggs = call_llm(ctx_for_llm, st.session_state.sadp_qc_default_checks, model_config)
                 except RuntimeError as e:
                     st.session_state.sadp_qc_llm_error = str(e)
                     st.rerun()

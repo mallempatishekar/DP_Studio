@@ -12,13 +12,8 @@ Reuses the shared provider config from utils/description_engine/config.py.
 import json
 import re
 
-from utils.description_engine.config import (
-    PROVIDER,
-    GROQ_API_KEY,
-    DEFAULT_GROQ_MODEL as GROQ_DEFAULT_MODEL,
-    OLLAMA_BASE_URL,
-    DEFAULT_OLLAMA_MODEL as OLLAMA_DEFAULT_MODEL,
-)
+from utils.ui_utils import get_llm_config, log_event, get_user_id
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM PROMPT
@@ -135,12 +130,17 @@ def _parse_response(raw: str) -> list[dict]:
 # GROQ
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_groq(prompt: str) -> list[dict]:
+def _call_groq(prompt: str, model_config: dict) -> list[dict]:
     from groq import Groq
 
-    client = Groq(api_key=GROQ_API_KEY)
+    api_key = model_config.get("api_key", "")
+    if not api_key:
+        raise ValueError("Groq API key is required for segment suggestions.")
+
+    model = model_config.get("model", "llama-3.1-8b-instant")
+    client = Groq(api_key=api_key)
     response = client.chat.completions.create(
-        model=GROQ_DEFAULT_MODEL,
+        model=model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": prompt},
@@ -155,11 +155,14 @@ def _call_groq(prompt: str) -> list[dict]:
 # OLLAMA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_ollama(prompt: str) -> list[dict]:
+def _call_ollama(prompt: str, model_config: dict) -> list[dict]:
     import urllib.request
 
+    base_url = model_config.get("base_url", "http://localhost:11434")
+    model = model_config.get("model", "llama3")
+
     payload = json.dumps({
-        "model":  OLLAMA_DEFAULT_MODEL,
+        "model":  model,
         "prompt": SYSTEM_PROMPT + "\n\n" + prompt,
         "stream": False,
         "format": "json",
@@ -204,10 +207,14 @@ def suggest_segments(
     """
     prompt = _build_prompt(table_name, dimensions, table_desc)
 
+    model_config = get_llm_config()
+    provider = model_config.get("provider", "groq")
+
     try:
-        if PROVIDER == "groq":
-            return _call_groq(prompt)
+        if provider == "groq":
+            return _call_groq(prompt, model_config)
         else:
-            return _call_ollama(prompt)
+            return _call_ollama(prompt, model_config)
     except Exception as e:
-        raise RuntimeError(f"Segment suggestion failed ({PROVIDER}): {e}") from e
+        log_event("error", "Segment suggestion failed", user_id=get_user_id(), provider=provider, error=str(e))
+        raise RuntimeError(f"Segment suggestion failed ({provider}): {e}") from e

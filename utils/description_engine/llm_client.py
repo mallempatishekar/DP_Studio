@@ -12,6 +12,7 @@ model_config examples:
 
 import json
 import time
+from utils.error_logger import log_groq_error, log_ollama_error, log_llm_output_error
 
 
 # ── Groq recommended free models ─────────────────────────────────────────────
@@ -62,45 +63,51 @@ def _parse_json_response(raw: str) -> dict:
 
 
 def _call_groq(prompt: str, model_config: dict) -> dict:
-    """Call Groq cloud API (free tier)."""
+    """Call Groq cloud API (free tier) with error handling."""
     try:
         from groq import Groq
-    except ImportError:
+    except ImportError as e:
+        log_groq_error("groq package not installed", exception=e)
         raise ImportError(
             "groq package not installed. Run: pip install groq"
         )
 
     api_key = model_config.get("api_key", "")
     if not api_key:
+        log_groq_error("Groq API key is required")
         raise ValueError("Groq API key is required. Get one free at console.groq.com")
 
-    model   = model_config.get("model", "llama3-8b-8192")
-    client  = Groq(api_key=api_key)
-
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": prompt},
-        ],
-        max_tokens=2000,
-        temperature=0.1,  # Low temp = more consistent JSON output
-    )
-
-    raw = response.choices[0].message.content
-    return _parse_json_response(raw)
+    model = model_config.get("model", "llama3-8b-8192")
+    
+    try:
+        client = Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            max_tokens=2000,
+            temperature=0.1,  # Low temp = more consistent JSON output
+        )
+        raw = response.choices[0].message.content
+        return _parse_json_response(raw)
+    except Exception as e:
+        log_groq_error(f"Groq API call failed with model '{model}'", exception=e)
+        raise
 
 
 def _call_ollama(prompt: str, model_config: dict) -> dict:
-    """Call local Ollama instance."""
+    """Call local Ollama instance with error handling."""
     try:
         import requests
-    except ImportError:
+    except ImportError as e:
+        log_ollama_error("requests package not installed", exception=e)
         raise ImportError("requests package not installed. Run: pip install requests")
 
     base_url = model_config.get("base_url", "http://localhost:11434")
-    model    = model_config.get("model", "mistral")
-    url      = f"{base_url}/api/generate"
+    model = model_config.get("model", "mistral")
+    url = f"{base_url}/api/generate"
 
     full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
 
@@ -112,11 +119,17 @@ def _call_ollama(prompt: str, model_config: dict) -> dict:
         "options": {"temperature": 0.1},
     }
 
-    resp = requests.post(url, json=payload, timeout=120)
-    resp.raise_for_status()
-
-    raw = resp.json().get("response", "")
-    return _parse_json_response(raw)
+    try:
+        resp = requests.post(url, json=payload, timeout=120)
+        resp.raise_for_status()
+        raw = resp.json().get("response", "")
+        return _parse_json_response(raw)
+    except requests.exceptions.ConnectionError as e:
+        log_ollama_error(f"Cannot connect to Ollama at {base_url}", exception=e)
+        raise
+    except Exception as e:
+        log_ollama_error(f"Ollama API call failed with model '{model}'", exception=e)
+        raise
 
 
 def call_llm(prompt: str, model_config: dict, retries: int = 1) -> dict:
@@ -136,6 +149,7 @@ def call_llm(prompt: str, model_config: dict, retries: int = 1) -> dict:
         RuntimeError: If API call itself fails.
     """
     provider = model_config.get("provider", "groq").lower()
+    model = model_config.get("model", "unknown")
 
     for attempt in range(retries + 1):
         try:
@@ -144,18 +158,29 @@ def call_llm(prompt: str, model_config: dict, retries: int = 1) -> dict:
             elif provider == "ollama":
                 data = _call_ollama(prompt, model_config)
             else:
-                raise ValueError(
-                    f"Unsupported provider: '{provider}'. Use 'groq' or 'ollama'."
-                )
+                error_msg = f"Unsupported provider: '{provider}'. Use 'groq' or 'ollama'."
+                log_groq_error(error_msg) if provider == "groq" else log_ollama_error(error_msg)
+                raise ValueError(error_msg)
+            
             return _validate_response(data)
 
         except (json.JSONDecodeError, ValueError, KeyError) as e:
+            if "LLM response missing" in str(e) or "invalid" in str(e).lower():
+                log_llm_output_error(
+                    f"LLM returned invalid JSON (attempt {attempt + 1}/{retries + 1}): {str(e)[:100]}",
+                    exception=e
+                )
+            
             if attempt < retries:
                 time.sleep(1)
                 continue
+            
             raise ValueError(
                 f"LLM returned invalid JSON after {retries + 1} attempt(s). "
                 f"Error: {e}"
             )
+        except Exception as e:
+            log_llm_output_error(f"LLM call failed with {provider}/{model}", exception=e)
+            raise
         except Exception as e:
             raise RuntimeError(f"LLM API call failed ({provider}): {e}") from e

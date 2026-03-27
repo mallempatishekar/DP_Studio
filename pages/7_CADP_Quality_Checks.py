@@ -23,12 +23,12 @@ def read_excel_cached(file):
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from utils.ui_utils import load_global_css, section_header, app_footer
+from utils.ui_utils import load_global_css, section_header, app_footer, get_llm_config
 from utils.default_checks import generate_default_checks
 from utils.llm_checks import call_llm
 from utils.sf_utils import fetch_full_context, fetch_schema_overview
 from utils.qc_yaml_generator import generate_qc_yaml
-from utils.qc_config import PROVIDER, GROQ_DEFAULT_MODEL, OLLAMA_DEFAULT_MODEL
+from utils.history import save_entry
 
 st.set_page_config(page_title="CADP — Quality Checks", page_icon="✅", layout="wide")
 load_global_css()
@@ -238,13 +238,14 @@ with nav_r:
             st.session_state[k] = _QC_DEFAULTS[k]
         st.rerun()
 
-model_label = GROQ_DEFAULT_MODEL if PROVIDER == "groq" else OLLAMA_DEFAULT_MODEL
+model_config = get_llm_config()
+provider = model_config.get("provider", "groq")
+model_label = model_config.get("model", "llama-3.1-8b-instant")
 st.markdown(
     f'<div style="background:#111827;border:1px solid #1f2937;border-radius:8px;'
     f'padding:8px 14px;font-size:12px;color:#6b7280;margin:8px 0;">'
-    f'⚙️ LLM Provider: <b style="color:#d1d5db">{PROVIDER.upper()}</b> &nbsp;|&nbsp; '
-    f'Model: <b style="color:#d1d5db">{model_label}</b> &nbsp;|&nbsp; '
-    f'Edit in <b style="color:#d1d5db">utils/qc_config.py</b></div>',
+    f'⚙️ LLM Provider: <b style="color:#d1d5db">{provider.upper()}</b> &nbsp;|&nbsp; '
+    f'Model: <b style="color:#d1d5db">{model_label}</b></div>',
     unsafe_allow_html=True,
 )
 st.divider()
@@ -427,6 +428,9 @@ if _has_sm_desc:
              "Turn off to let the LLM reason from column names and types only.",
     )
 
+if not model_config.get("api_key") and model_config.get("provider") == "groq":
+    st.warning("Please set your Groq API key in the sidebar LLM Configuration before generating quality checks.")
+
 llm_c1, llm_c2 = st.columns([4, 1])
 with llm_c1:
     llm_label = "✨ Generate LLM Suggestions" if not st.session_state.cadp_qc_llm_done else "🔄 Re-run LLM Suggestions"
@@ -466,7 +470,7 @@ if run_llm and not st.session_state.cadp_qc_llm_done:
                     _sm_injected = True
 
             try:
-                suggs = call_llm(ctx_for_llm, st.session_state.cadp_qc_default_checks)
+                suggs = call_llm(ctx_for_llm, st.session_state.cadp_qc_default_checks, model_config)
             except RuntimeError as e:
                 st.session_state.cadp_qc_llm_error = str(e)
                 st.rerun()
