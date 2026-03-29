@@ -57,12 +57,17 @@ def _reset_model_callback():
     st.session_state.groq_model_name = "llama-3.3-70b-versatile"
     # Note: No st.rerun() needed here, Streamlit reruns automatically after callback
 
+# --- Callback for API Key Sync (Must be defined before usage) ---
+def _on_api_key_change():
+    """Syncs the separate widget key back to our storage key."""
+    st.session_state.groq_api_key = st.session_state._api_key_widget
+
 def render_sidebar():
     # Initialize all LLM config keys at the start to ensure persistence
     if "llm_provider" not in st.session_state:
         st.session_state.llm_provider = "groq"
     if "groq_api_key" not in st.session_state:
-        st.session_state.groq_api_key = os.getenv("GROQ_API_KEY", "")
+        st.session_state.groq_api_key = ""
     if "groq_model_name" not in st.session_state:
         st.session_state.groq_model_name = "llama-3.3-70b-versatile"
     if "ollama_base_url" not in st.session_state:
@@ -105,13 +110,68 @@ def render_sidebar():
             )
 
             if provider == "groq":
-                # API Key — use key only, no value parameter for persistence
-                st.text_input(
-                    "Groq API Key", 
-                    type="password", 
-                    key="groq_api_key",
-                    help="Enter your Groq API Key (gsk_...)"
-                )
+                # Toggle state for show/hide
+                if "show_api_key" not in st.session_state:
+                    st.session_state.show_api_key = False
+
+                # CSS — mask input & proper alignment
+                security = "none" if st.session_state.show_api_key else "disc"
+                st.markdown(f"""
+                <style>
+                    /* Mask input */
+                    div[data-testid="stTextInput"] input[aria-label="Groq API Key"] {{
+                        -webkit-text-security: {security};
+                    }}
+
+                    /* Proper button styling */
+                    #toggle_api_key_btn {{
+                        min-height: 42px !important;
+                        width: 100% !important;
+                        display: flex !important;
+                        align-items: center !important;
+                        justify-content: center !important;
+                        border-radius: 8px !important;
+                        margin: 0 !important;
+                        padding: 0px !important;
+                    }}
+                    #toggle_api_key_btn > button {{
+                        min-height: 36px !important;
+                        height: 36px !important;
+                        width: 100% !important;
+                        padding: 0 8px !important;
+                        margin: 0 !important;
+                        line-height: 1 !important;
+                        font-size: 16px !important;
+                    }}
+                </style>
+                """, unsafe_allow_html=True)
+
+                # Re-seed widget if Streamlit cleared it during page switch
+                if "_api_key_widget" not in st.session_state:
+                    st.session_state._api_key_widget = st.session_state.get("groq_api_key", "")
+
+                # Input + Eye button side by side
+                key_col, btn_col = st.columns([0.88, 0.12], gap="small")
+                with key_col:
+                    st.text_input(
+                        "Groq API Key",
+                        key="_api_key_widget",
+                        on_change=_on_api_key_change,
+                        help="Enter your Groq API Key (gsk_...)"
+                    )
+                with btn_col:
+                    st.markdown(
+                        "<div style='display:flex; align-items:center; justify-content:center; height:100%; min-height:28px;'>",
+                        unsafe_allow_html=True
+                    )
+
+                    eye = "🙈" if st.session_state.show_api_key else "👁️"
+                    if st.button(eye, key="toggle_api_key_btn", help="Show / Hide API Key"):
+                        st.session_state.show_api_key = not st.session_state.show_api_key
+                        st.rerun()
+
+                    st.markdown("</div>", unsafe_allow_html=True)
+
                 
                 # Model List - Optimized for YAML/SQL generation
                 groq_models = [
