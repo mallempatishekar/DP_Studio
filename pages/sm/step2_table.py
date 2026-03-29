@@ -2,7 +2,7 @@ import streamlit as st
 from utils.generators import generate_table_yaml
 from sm.state import new_view
 from utils.examples import EXAMPLE_TABLE_YAML, show_example
-from utils.ui_utils import inline_docs_banner
+from utils.ui_utils import inline_docs_banner, get_llm_config # ADDED get_llm_config
 from utils.llm_measures import suggest_measures
 from utils.llm_segments import suggest_segments
 
@@ -18,6 +18,8 @@ def render_step2():
     t        = tables[tidx]
     n_tables = len(tables)
 
+    # Get LLM Config once at the start
+    llm_cfg = get_llm_config()
 
     # ── Table selector sidebar ────────────────────────────────────────────
     st.markdown(f"**Table YAML — {tidx + 1} of {n_tables}: `{t['name']}`**")
@@ -52,12 +54,14 @@ def render_step2():
                     for d in t["dims"]
                 ]
             }]
+            # PASS model_config
             _ai_results = render_description_panel(
                 tables=_ai_tables,
                 conn=st.session_state.get("sf_shared_conn"),
                 database=t.get("db", ""),
                 schema=t.get("schema", ""),
                 key_prefix=f"ai_desc_{tidx}",
+                model_config=llm_cfg
             )
             if _ai_results and t["name"] in _ai_results:
                 st.session_state[_results_key] = _ai_results
@@ -176,10 +180,12 @@ def render_step2():
                          help="Use AI to suggest measures based on your table columns"):
                 with st.spinner("Thinking…"):
                     try:
+                        # PASS model_config
                         _suggestions = suggest_measures(
                             table_name  = t["name"],
                             dimensions  = t["dims"],
                             table_desc  = t.get("tbl_desc", ""),
+                            model_config=llm_cfg
                         )
                         st.session_state[f"b_meas_suggestions_{tidx}"] = _suggestions
                     except Exception as _e:
@@ -262,7 +268,6 @@ def render_step2():
 
                     with _agg_col2:
                         if _sel_func == "Custom":
-                            # Custom: free text input
                             _custom_sql = st.text_input(
                                 "Custom SQL", value=m.get("sql", ""),
                                 key=f"b_mcust_{tidx}_{i}",
@@ -271,7 +276,6 @@ def render_step2():
                             _sel_dim = ""
                             _built_sql = _custom_sql
                         else:
-                            # Non-custom: dimension dropdown
                             _dim_opts = _dim_names if _dim_names else ["—"]
                             _sel_dim  = st.selectbox(
                                 "Dimension", _dim_opts,
@@ -383,10 +387,12 @@ def render_step2():
                          help="Use AI to suggest segments based on your table columns"):
                 with st.spinner("Thinking…"):
                     try:
+                        # PASS model_config
                         _seg_suggestions = suggest_segments(
                             table_name = t["name"],
                             dimensions = t["dims"],
                             table_desc = t.get("tbl_desc", ""),
+                            model_config=llm_cfg
                         )
                         st.session_state[f"b_seg_suggestions_{tidx}"] = _seg_suggestions
                     except Exception as _e:

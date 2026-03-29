@@ -1,19 +1,12 @@
 """
 utils/llm_segments.py
 LLM Segment Suggestion Engine
-
-Given a table name, its dimensions (columns), and optional table description,
-calls the configured LLM to suggest 3–5 meaningful segments with name, SQL
-filter expression, and description.
-
-Reuses the shared provider config from utils/description_engine/config.py.
 """
 
 import json
 import re
 
-from utils.ui_utils import get_llm_config, log_event, get_user_id
-
+# REMOVED: from utils.description_engine.config import ...
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM PROMPT
@@ -133,14 +126,15 @@ def _parse_response(raw: str) -> list[dict]:
 def _call_groq(prompt: str, model_config: dict) -> list[dict]:
     from groq import Groq
 
-    api_key = model_config.get("api_key", "")
+    api_key = model_config.get("api_key")
+    model_name = model_config.get("model", "llama-3.1-8b-instant")
+    
     if not api_key:
-        raise ValueError("Groq API key is required for segment suggestions.")
+        raise ValueError("Groq API Key is missing.")
 
-    model = model_config.get("model", "llama-3.1-8b-instant")
     client = Groq(api_key=api_key)
     response = client.chat.completions.create(
-        model=model,
+        model=model_name,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": prompt},
@@ -159,10 +153,10 @@ def _call_ollama(prompt: str, model_config: dict) -> list[dict]:
     import urllib.request
 
     base_url = model_config.get("base_url", "http://localhost:11434")
-    model = model_config.get("model", "llama3")
+    model_name = model_config.get("model", "llama3")
 
     payload = json.dumps({
-        "model":  model,
+        "model":  model_name,
         "prompt": SYSTEM_PROMPT + "\n\n" + prompt,
         "stream": False,
         "format": "json",
@@ -170,7 +164,7 @@ def _call_ollama(prompt: str, model_config: dict) -> list[dict]:
     }).encode()
 
     req = urllib.request.Request(
-        f"{OLLAMA_BASE_URL}/api/generate",
+        f"{base_url}/api/generate",
         data=payload,
         headers={"Content-Type": "application/json"},
     )
@@ -189,32 +183,20 @@ def suggest_segments(
     table_name: str,
     dimensions: list[dict],
     table_desc: str = "",
+    model_config: dict = None, # ADDED
 ) -> list[dict]:
     """
     Call the configured LLM to suggest segments for a table.
-
-    Args:
-        table_name:  The table name.
-        dimensions:  List of dimension dicts with 'name'/'column', 'type', 'description' keys.
-        table_desc:  Optional table description for richer context.
-
-    Returns:
-        List of segment dicts: [{"name", "sql", "description"}, ...]
-        Returns [] on any failure.
-
-    Raises:
-        RuntimeError with a human-readable message on failure.
     """
+    if not model_config:
+        raise ValueError("LLM Config is missing. Please configure in the sidebar.")
+
     prompt = _build_prompt(table_name, dimensions, table_desc)
 
-    model_config = get_llm_config()
-    provider = model_config.get("provider", "groq")
-
     try:
-        if provider == "groq":
+        if model_config.get("provider") == "groq":
             return _call_groq(prompt, model_config)
         else:
             return _call_ollama(prompt, model_config)
     except Exception as e:
-        log_event("error", "Segment suggestion failed", user_id=get_user_id(), provider=provider, error=str(e))
-        raise RuntimeError(f"Segment suggestion failed ({provider}): {e}") from e
+        raise RuntimeError(f"Segment suggestion failed: {e}") from e

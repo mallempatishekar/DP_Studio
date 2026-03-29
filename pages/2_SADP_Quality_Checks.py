@@ -22,7 +22,7 @@ from utils.qc_learning.save_learning import save_reference_rules
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from utils.ui_utils import load_global_css, render_sidebar, section_header, app_footer, get_llm_config
+from utils.ui_utils import load_global_css, section_header, app_footer
 from utils.sf_utils import (
     connect, fetch_databases, fetch_schemas,
     fetch_tables, fetch_full_context, fetch_schema_overview,
@@ -30,11 +30,9 @@ from utils.sf_utils import (
 from utils.default_checks import generate_default_checks
 from utils.llm_checks import call_llm
 from utils.qc_yaml_generator import generate_qc_yaml
-from utils.history import save_entry
 
 st.set_page_config(page_title="SADP — Quality Checks", page_icon="✅", layout="wide")
 load_global_css()
-render_sidebar()
 
 CATEGORIES = [
     ("Schema",       "🔷", "#1e3a5f", "#93c5fd"),
@@ -70,6 +68,10 @@ _QC_DEFAULTS = {
     "sadp_qc_wf_tag_tier": "Source Aligned",
     "sadp_qc_wf_tag_region": "", "sadp_qc_wf_tag_dataos": "", "sadp_qc_wf_tag_custom": "",
     "sadp_qc_last_yaml": None, "sadp_qc_last_yaml_name": "",
+    
+    # LLM Config State
+    "sadp_qc_llm_provider": "Groq",
+    "sadp_qc_llm_model": "llama3-70b-8192"
 }
 
 for k, v in _QC_DEFAULTS.items():
@@ -137,72 +139,58 @@ with nav_r:
             st.session_state[k] = _QC_DEFAULTS[k]
         st.rerun()
 
-model_config = get_llm_config()
-provider = model_config.get("provider", "groq")
-model_label = model_config.get("model", "llama-3.1-8b-instant")
-st.markdown(
-    f'<div style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:8px;'
-    f'padding:8px 14px;font-size:12px;color:#6b7280;margin:8px 0;">'
-    f'⚙️ LLM Provider: <b style="color:#374151">{provider.upper()}</b> &nbsp;|&nbsp; '
-    f'Model: <b style="color:#374151">{model_label}</b></div>',
-    unsafe_allow_html=True,
-)
+# ── LLM Configuration UI ─────────────────────────────────────────────────────
+with st.expander("⚙️ LLM Configuration", expanded=False):
+    c1, c2 = st.columns(2)
+    with c1:
+        provider = st.selectbox(
+            "Provider", 
+            ["Groq", "Ollama"], 
+            index=0 if st.session_state.sadp_qc_llm_provider == "Groq" else 1,
+            key="sadp_qc_ui_provider"
+        )
+        st.session_state.sadp_qc_llm_provider = provider
+        
+        if provider == "Groq":
+            default_models = ["llama3-70b-8192", "llama3-8b-8192", "mixtral-8x7b-32768"]
+            model = st.selectbox(
+                "Model", 
+                default_models, 
+                index=default_models.index(st.session_state.sadp_qc_llm_model) if st.session_state.sadp_qc_llm_model in default_models else 0,
+                key="sadp_qc_ui_model_groq"
+            )
+            api_key = st.text_input("Groq API Key", type="password", key="sadp_qc_ui_api_key")
+        else:
+            # Ollama logic
+            model = st.text_input("Model Name (Ollama)", value="llama3", key="sadp_qc_ui_model_ollama")
+            api_key = None # Not needed for Ollama
+        
+        st.session_state.sadp_qc_llm_model = model
+
 st.divider()
 
 # ── ① Database Connection ─────────────────────────────────────────────────────
 section_header("🔗", "Database Connection")
 
 # ── Snowflake Connection ──────────────────────────────────────────────────────
-# Level 1: reuse existing sf_conn object
 if st.session_state.sadp_qc_sf_conn is None and st.session_state.get("sf_conn"):
     try:
         st.session_state.sadp_qc_sf_conn      = st.session_state.sf_conn
         st.session_state.sadp_qc_sf_databases = fetch_databases(st.session_state.sadp_qc_sf_conn)
-        st.success("✅ Reusing Snowflake connection from previous step.")
+        st.success("✅ Reusing Snowflake connection from Depot step.")
     except Exception:
         st.session_state.sadp_qc_sf_conn = None
 
-# Level 2: auto-connect from Depot credentials (no form needed)
 if st.session_state.sadp_qc_sf_conn is None:
-    _d_acct = st.session_state.get("depot_account", "")
-    _d_user = st.session_state.get("depot_username", "")
-    _d_pw   = st.session_state.get("depot_password", "")
-    _d_wh   = st.session_state.get("depot_warehouse", "")
-    if _d_acct and _d_user and _d_pw:
-        with st.spinner("Auto-connecting to Snowflake using Depot credentials..."):
-            try:
-                _auto_conn = connect(_d_acct.strip(), _d_user.strip(), _d_pw, warehouse=_d_wh.strip())
-                st.session_state.sadp_qc_sf_conn      = _auto_conn
-                st.session_state.sadp_qc_sf_databases = fetch_databases(_auto_conn)
-                st.session_state["sf_conn"]           = _auto_conn
-                st.success("✅ Auto-connected to Snowflake using Depot credentials.")
-                st.rerun()
-            except Exception as _e:
-                st.warning(f"⚠️ Could not auto-connect using Depot credentials: {_e}. Please connect manually below.")
-
-# Level 3: manual form — pre-fill from depot credentials where available
-if st.session_state.sadp_qc_sf_conn is None:
-    _pre_acct = st.session_state.get("depot_account", "")
-    _pre_user = st.session_state.get("depot_username", "")
-    _pre_wh   = st.session_state.get("depot_warehouse", "")
     with st.form("sadp_qc_sf_form"):
         c1, c2 = st.columns(2)
         with c1:
-            sf_acct = st.text_input("Account Identifier *", value=_pre_acct,
-                                    placeholder="abc12345.us-east-1.aws")
-            sf_user = st.text_input("Username *", value=_pre_user,
-                                    placeholder="john_doe")
+            sf_acct = st.text_input("Account Identifier *", placeholder="abc12345.us-east-1.aws")
+            sf_user = st.text_input("Username *", placeholder="john_doe")
         with c2:
             sf_pw   = st.text_input("Password *", type="password")
             sf_role = st.text_input("Role (optional)", placeholder="SYSADMIN")
-            sf_wh   = st.text_input("Warehouse (optional)", value=_pre_wh,
-                                    placeholder="COMPUTE_WH")
-        if _pre_acct or _pre_user:
-            st.markdown(
-                '<p style="font-size:12px;color:#6b7280;margin-top:4px;">'
-                '💡 Account, username and warehouse pre-filled from Depot step. Enter password to connect.</p>',
-                unsafe_allow_html=True,
-            )
+            sf_wh   = st.text_input("Warehouse (optional)", placeholder="COMPUTE_WH")
         go = st.form_submit_button("Connect", use_container_width=True, type="primary")
     if go:
         if not sf_acct or not sf_user or not sf_pw:
@@ -213,7 +201,6 @@ if st.session_state.sadp_qc_sf_conn is None:
                     _conn = connect(sf_acct.strip(), sf_user.strip(), sf_pw, sf_role.strip(), sf_wh.strip())
                     st.session_state.sadp_qc_sf_conn      = _conn
                     st.session_state.sadp_qc_sf_databases = fetch_databases(_conn)
-                    st.session_state["sf_conn"]           = _conn
                     st.rerun()
                 except Exception as e:
                     st.error(f"Connection failed: {e}")
@@ -255,7 +242,6 @@ with d1:
         st.session_state[_schema_list_key] = _fetch_schemas(_conn, sel_db)
         st.session_state[_last_schema_key] = ""
         st.session_state[_table_list_key]  = []
-        # Reset selection state
         st.session_state.sadp_qc_selected_tables = []
         st.session_state.sadp_qc_processed_tables = set()
         st.session_state.sadp_qc_all_yaml = {}
@@ -268,13 +254,11 @@ with d2:
     if sel_sc != "— select —" and sel_sc != st.session_state[_last_schema_key]:
         st.session_state[_last_schema_key] = sel_sc
         st.session_state[_table_list_key]  = _fetch_tables(_conn, st.session_state[_last_db_key], sel_sc)
-        # Reset selection state
         st.session_state.sadp_qc_selected_tables = []
         st.session_state.sadp_qc_processed_tables = set()
         st.session_state.sadp_qc_all_yaml = {}
         st.rerun()
 
-# Multi-select for tables
 available_tables = st.session_state[_table_list_key]
 if not available_tables:
     st.stop()
@@ -286,18 +270,15 @@ selected_tables = st.multiselect(
     help="Select one or more tables to generate QC checks."
 )
 
-# Update session state if selection changes
 if selected_tables != st.session_state.sadp_qc_selected_tables:
     st.session_state.sadp_qc_selected_tables = selected_tables
 
-# Progress Display
 total_selected = len(selected_tables)
 total_done = len([t for t in selected_tables if t in st.session_state.sadp_qc_processed_tables])
 
 if total_selected > 0:
     st.progress(total_done / total_selected, text=f"Progress: {total_done}/{total_selected} tables processed")
 
-# Determine current table to process
 current_table = None
 if st.session_state.sadp_qc_current_table:
     current_table = st.session_state.sadp_qc_current_table
@@ -307,7 +288,6 @@ elif selected_tables:
             current_table = t
             break
 
-# Action Buttons
 col_act1, col_act2, col_act3 = st.columns([2, 2, 2])
 with col_act1:
     if current_table and current_table not in st.session_state.sadp_qc_processed_tables:
@@ -384,11 +364,6 @@ with col_act2:
                 progress_bar.progress((i + 1) / len(remaining))
             
             status_text.text("Bulk generation complete!")
-            # Set last_yaml to the final table so preview section renders
-            if st.session_state.sadp_qc_all_yaml:
-                _last_tbl = list(st.session_state.sadp_qc_all_yaml.keys())[-1]
-                st.session_state.sadp_qc_last_yaml      = st.session_state.sadp_qc_all_yaml[_last_tbl]
-                st.session_state.sadp_qc_last_yaml_name = f"soda-{_last_tbl.lower()}-qc.yml"
             st.rerun()
 
 with col_act3:
@@ -398,13 +373,13 @@ with col_act3:
             for t_name, yaml_content in st.session_state.sadp_qc_all_yaml.items():
                 if isinstance(yaml_content, (dict, list)):
                     import yaml
-                    _content = yaml.dump(yaml_content, sort_keys=False)
+                    content = yaml.dump(yaml_content, sort_keys=False)
                 else:
-                    _content = yaml_content
-
+                    content = yaml_content
+                
                 fname = f"soda-{t_name.lower()}-qc.yml"
-                zf.writestr(fname, _content)
-
+                zf.writestr(fname, content)
+        
         zip_buffer.seek(0)
         st.download_button(
             "📥 Download All QC (ZIP)",
@@ -414,24 +389,6 @@ with col_act3:
             use_container_width=True,
             type="primary"
         )
-
-# ── Back to SADP Flow — shown when at least one table is done ─────────────────
-if st.session_state.sadp_qc_all_yaml and st.session_state.get("sadp_qc_origin") == "sadp_full":
-    _n_done = len(st.session_state.sadp_qc_all_yaml)
-    st.markdown(" ")
-    st.markdown(
-        f'<div style="background:#f0fdf4;border:1px solid #86efac;border-left:3px solid #16a34a;'
-        f'border-radius:8px;padding:10px 16px;font-size:13px;color:#15803d;margin-bottom:8px;">'
-        f'✅ <b>{_n_done} table{"s" if _n_done != 1 else ""}</b> '
-        f'{"have" if _n_done != 1 else "has"} been processed and saved.</div>',
-        unsafe_allow_html=True,
-    )
-    if st.button("✅ Done — Back to SADP Flow", key="sadp_qc_back_to_flow",
-                 type="primary", use_container_width=True):
-        if "sadp_completed_steps" not in st.session_state:
-            st.session_state.sadp_completed_steps = set()
-        st.session_state.sadp_completed_steps.add(2)
-        st.switch_page("pages/sadp_flow.py")
 
 # ── ③ Checks Review (Single Table) ───────────────────────────────────────────
 if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"):
@@ -483,10 +440,7 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
             st.session_state.sadp_qc_llm_error       = None
             st.rerun()
 
-    model_config = get_llm_config()
-    if not model_config.get("api_key") and model_config.get("provider") == "groq":
-        st.warning("Please set your Groq API key in the sidebar LLM Configuration before generating quality checks.")
-    elif run_llm and not st.session_state.sadp_qc_llm_done:
+    if run_llm and not st.session_state.sadp_qc_llm_done:
         with st.spinner("Calling LLM..."):
             try:
                 ctx_for_llm = ctx.copy()
@@ -498,11 +452,24 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                         col_desc = dict(zip(tbl_rows["column_name"], tbl_rows["column_description"]))
                         for col in ctx_for_llm["columns"]:
                             col["description"] = col_desc.get(col["name"], "")
+                
+                # Get dynamic config from session
+                _provider = st.session_state.sadp_qc_llm_provider.lower()
+                _model = st.session_state.sadp_qc_llm_model
+                _api_key = st.session_state.get("sadp_qc_ui_api_key")
+
                 try:
-                    suggs = call_llm(ctx_for_llm, st.session_state.sadp_qc_default_checks, model_config)
+                    suggs = call_llm(
+                        ctx_for_llm, 
+                        st.session_state.sadp_qc_default_checks,
+                        provider=_provider,
+                        model_name=_model,
+                        api_key=_api_key
+                    )
                 except RuntimeError as e:
                     st.session_state.sadp_qc_llm_error = str(e)
                     st.rerun()
+                    
                 for chk in suggs:
                     chk["_original"] = {
                         "name": chk.get("name"),
@@ -521,7 +488,7 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
 
     if st.session_state.sadp_qc_llm_error:
         st.error(f"LLM error: {st.session_state.sadp_qc_llm_error}")
-        st.caption("Check your API key in utils/qc_config.py")
+        st.caption("Check your API key in the LLM Configuration expander above.")
     if st.session_state.sadp_qc_llm_done and st.session_state.sadp_qc_llm_suggestions:
         st.success(f"✅ {len(st.session_state.sadp_qc_llm_suggestions)} LLM suggestions ready — tick what you want to include.")
 
@@ -560,10 +527,7 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                     col_chk, col_acc = st.columns([0.5, 9.5])
                     with col_acc:
                         with st.expander(f"[DEFAULT] {chk['col'] or 'table-level'} — {chk['name'][:80]}", expanded=False):
-                            st.markdown('<span style="font-size:10px;font-weight:700;background:#dbeafe;color:#1d4ed8;border:1px solid #bfdbfe;padding:1px 7px;border-radius:10px;">DEFAULT</span>', unsafe_allow_html=True)
                             st.code(syntax_preview(chk), language="yaml")
-                            if chk.get("body"):
-                                st.json(chk["body"])
                             new_syn  = st.text_area("Edit SodaCL condition", value=chk["syntax"], key=f"sadp_def_syn_{idx}", height=60)
                             st.session_state.sadp_qc_default_checks[idx]["syntax"] = new_syn
                             new_name = st.text_input("Check name", value=chk["name"], key=f"sadp_def_name_{idx}")
@@ -573,10 +537,7 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                                 try:
                                     st.session_state.sadp_qc_default_checks[idx]["body"] = json.loads(body_str)
                                 except Exception:
-                                    st.caption("⚠️ Invalid JSON — original body preserved")
-                            orig = chk.get("_original", {})
-                            if new_name != orig.get("name") or new_syn != orig.get("syntax"):
-                                st.markdown("<span style='color:#facc15;font-weight:600;'>✏️ Modified</span>", unsafe_allow_html=True)
+                                    pass
                     with col_chk:
                         acc = st.checkbox("✓", value=st.session_state.sadp_qc_accepted_defaults.get(idx, True), key=f"sadp_def_acc_{idx}", label_visibility="collapsed")
                         st.session_state.sadp_qc_accepted_defaults[idx] = acc
@@ -587,7 +548,6 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                     col_chk, col_acc = st.columns([0.5, 9.5])
                     with col_acc:
                         with st.expander(f"[LLM] {chk.get('col') or 'table-level'} — {chk.get('name','')[:80]}", expanded=False):
-                            st.markdown('<span style="font-size:10px;font-weight:700;background:#3b0764;color:#d8b4fe;padding:1px 7px;border-radius:10px;">LLM SUGGESTION</span>', unsafe_allow_html=True)
                             if chk.get("reason"):
                                 st.markdown(f'<div style="font-size:11px;color:#6b7280;font-style:italic;margin-top:4px;">💡 {chk["reason"]}</div>', unsafe_allow_html=True)
                             new_name = st.text_input("Check name", value=chk.get("name",""), key=f"sadp_llm_name_{idx}")
@@ -599,7 +559,7 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                                 try:
                                     st.session_state.sadp_qc_llm_suggestions[idx]["body"] = json.loads(body_str)
                                 except Exception:
-                                    st.caption("⚠️ Invalid JSON")
+                                    pass
                     with col_chk:
                         acc = st.checkbox("✓", value=st.session_state.sadp_qc_accepted_llm.get(idx, False), key=f"sadp_llm_acc_{idx}", label_visibility="collapsed")
                         st.session_state.sadp_qc_accepted_llm[idx] = acc
@@ -610,7 +570,6 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                     col_chk, col_acc = st.columns([0.5, 9.5])
                     with col_acc:
                         with st.expander(f"[MANUAL] {chk.get('col') or 'table-level'} — {chk['name'][:80]}", expanded=False):
-                            st.markdown("<span style='color:#10b981;font-weight:700;'>🟢 MANUAL</span>", unsafe_allow_html=True)
                             new_name = st.text_input("Check name", value=chk["name"], key=f"sadp_man_name_{idx}")
                             manual_checks[idx]["name"] = new_name
                             new_syn  = st.text_area("Edit SodaCL condition", value=chk["syntax"], key=f"sadp_man_syn_{idx}", height=70)
@@ -620,7 +579,6 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                         acc_manual[idx] = acc
             st.markdown("---")
 
-    # ── Summary ───────────────────────────────────────────────────────────────────
     acc_def_count = sum(1 for v in st.session_state.sadp_qc_accepted_defaults.values() if v)
     acc_llm_count = sum(1 for v in st.session_state.sadp_qc_accepted_llm.values() if v)
     acc_man_count = sum(1 for v in acc_manual.values() if v)
@@ -702,7 +660,6 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
             if not wf_name.strip() or not wf_depot.strip() or not wf_workspace.strip():
                 st.error("Workflow name, Depot, and Workspace are required.")
             else:
-                # Persist global tags
                 st.session_state.sadp_qc_wf_depot = wf_depot.strip()
                 st.session_state.sadp_qc_wf_workspace = wf_workspace.strip()
                 st.session_state.sadp_qc_wf_tag_domain = tag_domain.strip()
@@ -712,7 +669,6 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                 st.session_state.sadp_qc_wf_tag_dataos = tag_dataos.strip()
                 st.session_state.sadp_qc_wf_tag_custom = tag_custom.strip()
                 
-                # Collect accepted checks
                 accepted = []
                 for i, chk in enumerate(st.session_state.sadp_qc_default_checks):
                     if st.session_state.sadp_qc_accepted_defaults.get(i, True):
@@ -740,16 +696,15 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
                         engine=wf_engine.strip() or None, cluster=wf_cluster.strip() or None,
                     )
                     
-                    # Save to all_yaml dict
                     st.session_state.sadp_qc_all_yaml[st.session_state.sadp_qc_current_table] = yaml_out
                     st.session_state.sadp_qc_processed_tables.add(st.session_state.sadp_qc_current_table)
                     
-                    # Save for immediate viewing
                     st.session_state.sadp_qc_last_yaml = yaml_out
                     st.session_state.sadp_qc_last_yaml_name = f"{wf_name.strip()}.yaml"
+                    st.session_state.sadp_qc_generated_yaml = yaml_out
+                    st.session_state.sadp_qc_name = wf_name.strip()
                     
                     st.success(f"✅ QC generated for {st.session_state.sadp_qc_current_table}")
-                    # REMOVED st.rerun() to allow code to render immediately below
                     
                 except Exception as e:
                     st.error(f"YAML generation failed: {e}")
@@ -758,42 +713,24 @@ if st.session_state.sadp_qc_ctx and st.session_state.get("sadp_qc_current_table"
 if st.session_state.sadp_qc_last_yaml:
     st.divider()
     section_header("📄", "Generated QC YAML")
-
-    # If multiple tables generated via bulk, show all in tabs
-    all_yaml = st.session_state.sadp_qc_all_yaml
-    if len(all_yaml) > 1:
-        st.markdown(
-            f'<p style="font-size:13px;color:#6b7280;margin-bottom:8px;">'
-            f'Showing all {len(all_yaml)} generated files — click a tab to preview.</p>',
-            unsafe_allow_html=True,
-        )
-        _tab_names = list(all_yaml.keys())
-        _tabs = st.tabs(_tab_names)
-        for _ti, (_tname, _tyaml) in enumerate(all_yaml.items()):
-            with _tabs[_ti]:
-                _fname = f"soda-{_tname.lower()}-qc.yml"
-                st.download_button(
-                    f"⬇️ Download {_fname}",
-                    data=_tyaml,
-                    file_name=_fname,
-                    mime="text/yaml",
-                    use_container_width=True,
-                    type="primary",
-                    key=f"dl_bulk_{_tname}",
-                )
-                st.code(_tyaml, language="yaml")
-    else:
-        # Single table — original layout
-        dl_col, next_col = st.columns([2, 2])
-        with dl_col:
-            st.download_button("⬇️ Download YAML", data=st.session_state.sadp_qc_last_yaml,
-                file_name=st.session_state.sadp_qc_last_yaml_name or "sadp-qc.yaml",
-                mime="text/yaml", use_container_width=True, type="primary")
-        with next_col:
-            if st.button("➡️ Next Table", use_container_width=True, type="secondary"):
-                reset_table_state()
-                st.session_state.sadp_qc_current_table = None
-                st.rerun()
-        st.code(st.session_state.sadp_qc_last_yaml, language="yaml")
+    
+    dl_col, next_col, back_col = st.columns([2, 1, 2])
+    with dl_col:
+        st.download_button("⬇️ Download YAML", data=st.session_state.sadp_qc_last_yaml,
+            file_name=st.session_state.sadp_qc_last_yaml_name or "sadp-qc.yaml",
+            mime="text/yaml", use_container_width=True, type="primary")
+            
+    with next_col:
+        if st.button("➡️ Next Table", use_container_width=True, type="secondary"):
+            reset_table_state()
+            st.session_state.sadp_qc_current_table = None
+            st.rerun()
+    
+    with back_col:
+        if st.button("✅ Complete & Back to SADP Flow →", use_container_width=True, type="secondary"):
+            st.session_state.sadp_completed_steps.add(2)
+            st.switch_page("pages/sadp_flow.py")
+            
+    st.code(st.session_state.sadp_qc_last_yaml, language="yaml")
 
 app_footer()
